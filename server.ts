@@ -610,6 +610,10 @@ async function startServer() {
     }
   }
 
+  // Global memory tracking of the active target for proxying
+  let activeProxyTargetOrigin: string | null = null;
+  let activeProxyTargetUrl: string | null = null;
+
   function generateInlineRuntimeJs(targetUrl: URL, proxyOrigin: string): string {
     return `
 (function() {
@@ -728,11 +732,13 @@ async function startServer() {
     if (isInspectorActive) {
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
       return;
     }
     var form = e.target;
     if (!form || !form.tagName || form.tagName.toLowerCase() !== 'form') return;
     try {
+      form.target = '_self';
       var action = form.getAttribute('action') || '';
       if (e.submitter && e.submitter.getAttribute('formaction')) {
         action = e.submitter.getAttribute('formaction');
@@ -748,6 +754,7 @@ async function startServer() {
     var origFormSubmit = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function() {
       try {
+        this.target = '_self';
         var action = this.getAttribute('action') || '';
         var targetUrl = resolveTargetUrl(action || window.__AUTOCLICKER_TARGET_URL__);
         if (targetUrl && !targetUrl.includes('/api/proxy?url=')) {
@@ -758,13 +765,120 @@ async function startServer() {
     };
   } catch(e) {}
 
+  // Floating In-Frame HUD Banner to clearly show when Target Picking is active
+  function updateFloatingHud(active, customMessage) {
+    var hud = document.getElementById('__autoclicker_floating_hud');
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.id = '__autoclicker_floating_hud';
+      hud.style.position = 'fixed';
+      hud.style.top = '12px';
+      hud.style.left = '50%';
+      hud.style.transform = 'translateX(-50%)';
+      hud.style.zIndex = '2147483647';
+      hud.style.backgroundColor = '#0f172a';
+      hud.style.color = '#f8fafc';
+      hud.style.padding = '8px 18px';
+      hud.style.borderRadius = '9999px';
+      hud.style.border = '2px solid #f59e0b';
+      hud.style.boxShadow = '0 10px 30px rgba(0,0,0,0.7), 0 0 15px rgba(245,158,11,0.4)';
+      hud.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+      hud.style.fontSize = '12px';
+      hud.style.fontWeight = '600';
+      hud.style.display = 'flex';
+      hud.style.alignItems = 'center';
+      hud.style.gap = '10px';
+      hud.style.pointerEvents = 'auto';
+      hud.style.userSelect = 'none';
+
+      var dot = document.createElement('span');
+      dot.id = '__autoclicker_hud_dot';
+      dot.style.width = '10px';
+      dot.style.height = '10px';
+      dot.style.borderRadius = '50%';
+      dot.style.backgroundColor = '#f59e0b';
+      dot.style.boxShadow = '0 0 8px #f59e0b';
+      hud.appendChild(dot);
+
+      var txt = document.createElement('span');
+      txt.id = '__autoclicker_hud_text';
+      hud.appendChild(txt);
+
+      var exitBtn = document.createElement('button');
+      exitBtn.id = '__autoclicker_hud_exit_btn';
+      exitBtn.textContent = '✕ Завершить выбор';
+      exitBtn.style.backgroundColor = '#334155';
+      exitBtn.style.color = '#f1f5f9';
+      exitBtn.style.border = '1px solid #475569';
+      exitBtn.style.borderRadius = '6px';
+      exitBtn.style.padding = '4px 10px';
+      exitBtn.style.fontSize = '11px';
+      exitBtn.style.cursor = 'pointer';
+      exitBtn.style.fontWeight = 'bold';
+      exitBtn.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        ev.preventDefault();
+        setInspectorState(false);
+        window.parent.postMessage({ type: 'TOGGLE_INSPECTOR', active: false }, '*');
+      });
+      hud.appendChild(exitBtn);
+
+      document.body.appendChild(hud);
+    }
+
+    if (active) {
+      hud.style.display = 'flex';
+      var txtEl = hud.querySelector('#__autoclicker_hud_text');
+      if (txtEl) {
+        txtEl.textContent = customMessage || 'Прицел активен: кликните на любую кнопку или ссылку для выбора цели';
+      }
+    } else {
+      hud.style.display = 'none';
+    }
+  }
+
+  function setInspectorState(active) {
+    isInspectorActive = !!active;
+    try {
+      document.documentElement.style.cursor = isInspectorActive ? 'crosshair' : '';
+      if (document.body) document.body.style.cursor = isInspectorActive ? 'crosshair' : '';
+    } catch(e) {}
+
+    updateFloatingHud(isInspectorActive);
+
+    if (!isInspectorActive && hoverOverlay) {
+      hoverOverlay.style.display = 'none';
+    }
+  }
+
+  // Intercept pointer and mouse events during inspector mode so website cannot navigate or react
+  ['mousedown', 'mouseup', 'pointerdown', 'pointerup'].forEach(function(evtName) {
+    window.addEventListener(evtName, function(e) {
+      if (isInspectorActive) {
+        var target = e.target;
+        if (target && target.closest && target.closest('#__autoclicker_floating_hud')) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      }
+    }, true);
+  });
+
   // Unified click handler: Inspector Selection vs Link Navigation
-  document.addEventListener('click', function(e) {
+  window.addEventListener('click', function(e) {
+    var clickedEl = e.target;
+    if (clickedEl && clickedEl.closest && clickedEl.closest('#__autoclicker_floating_hud')) {
+      return;
+    }
+
     if (isInspectorActive) {
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
 
-      var target = hoveredElement || e.target;
+      var target = hoveredElement || clickedEl;
       if (!target || (target.id && target.id.startsWith('__autoclicker'))) return;
 
       var selector = generateSelector(target);
@@ -785,32 +899,49 @@ async function startServer() {
       }, '*');
 
       showClickRipple(rect.left + rect.width / 2, rect.top + rect.height / 2, '#10b981');
+      flashPickedConfirmation(target, selector, text);
       return;
     }
 
-    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    // Normal navigation mode: Route links safely through proxy
+    var a = clickedEl && clickedEl.closest ? clickedEl.closest('a') : null;
     if (a) {
+      a.target = '_self';
       var href = a.getAttribute('href');
       if (href && !href.startsWith('javascript:') && !href.startsWith('#')) {
         var resolved = resolveTargetUrl(href);
         if (resolved && !resolved.includes('/api/proxy?url=')) {
           e.preventDefault();
+          e.stopPropagation();
           window.location.href = '/api/proxy?url=' + encodeURIComponent(resolved);
         }
       }
     }
   }, true);
 
+  function flashPickedConfirmation(target, selector, text) {
+    updateFloatingHud(true, '✓ Цель выбрана: <' + target.tagName.toLowerCase() + '> ' + (text ? '"' + text.slice(0, 20) + '"' : selector));
+    var prevOutline = target.style.outline;
+    var prevShadow = target.style.boxShadow;
+    target.style.outline = '3px solid #10b981';
+    target.style.boxShadow = '0 0 20px #10b981';
+    setTimeout(function() {
+      target.style.outline = prevOutline;
+      target.style.boxShadow = prevShadow;
+    }, 1200);
+  }
+
   // Inspector Hover Overlay
   function createHoverOverlay() {
-    if (hoverOverlay && document.body.contains(hoverOverlay)) return hoverOverlay;
+    if (hoverOverlay && document.body && document.body.contains(hoverOverlay)) return hoverOverlay;
     var el = document.createElement('div');
     el.id = '__autoclicker_picker_overlay';
     el.style.position = 'fixed';
     el.style.pointerEvents = 'none';
-    el.style.zIndex = '2147483647';
-    el.style.border = '2px solid #3b82f6';
-    el.style.backgroundColor = 'rgba(59, 130, 246, 0.2)';
+    el.style.zIndex = '2147483646';
+    el.style.border = '2px solid #f59e0b';
+    el.style.backgroundColor = 'rgba(245, 158, 11, 0.2)';
+    el.style.boxShadow = '0 0 12px rgba(245, 158, 11, 0.5)';
     el.style.transition = 'all 0.05s ease-out';
     el.style.borderRadius = '4px';
     el.style.display = 'none';
@@ -818,18 +949,18 @@ async function startServer() {
     var tagBadge = document.createElement('div');
     tagBadge.id = '__autoclicker_picker_badge';
     tagBadge.style.position = 'absolute';
-    tagBadge.style.top = '-24px';
+    tagBadge.style.top = '-26px';
     tagBadge.style.left = '0';
     tagBadge.style.background = '#0f172a';
-    tagBadge.style.color = '#38bdf8';
+    tagBadge.style.color = '#f59e0b';
     tagBadge.style.fontFamily = 'monospace';
     tagBadge.style.fontSize = '11px';
     tagBadge.style.fontWeight = 'bold';
-    tagBadge.style.padding = '2px 6px';
+    tagBadge.style.padding = '3px 8px';
     tagBadge.style.borderRadius = '4px';
-    tagBadge.style.border = '1px solid #1e293b';
+    tagBadge.style.border = '1px solid #f59e0b';
     tagBadge.style.whiteSpace = 'nowrap';
-    tagBadge.style.boxShadow = '0 2px 8px rgba(0,0,0,0.5)';
+    tagBadge.style.boxShadow = '0 4px 12px rgba(0,0,0,0.6)';
     el.appendChild(tagBadge);
 
     document.body.appendChild(el);
@@ -880,7 +1011,9 @@ async function startServer() {
   function onMouseMove(e) {
     if (!isInspectorActive) return;
     var target = document.elementFromPoint(e.clientX, e.clientY);
-    if (!target || (target.id && target.id.startsWith('__autoclicker'))) return;
+    if (!target || (target.id && target.id.startsWith('__autoclicker')) || (target.closest && target.closest('#__autoclicker_floating_hud'))) {
+      return;
+    }
 
     hoveredElement = target;
     var overlay = createHoverOverlay();
@@ -897,7 +1030,7 @@ async function startServer() {
       var tag = target.tagName.toLowerCase();
       var textSnippet = (target.innerText || target.value || target.getAttribute('aria-label') || '').trim();
       if (textSnippet.length > 20) textSnippet = textSnippet.slice(0, 20) + '...';
-      badge.textContent = tag + (textSnippet ? ' "' + textSnippet + '"' : '');
+      badge.textContent = '🎯 <' + tag + '>' + (textSnippet ? ' "' + textSnippet + '"' : '') + ' (клик для выбора)';
     }
   }
 
@@ -918,7 +1051,7 @@ async function startServer() {
 
     document.body.appendChild(ripple);
     requestAnimationFrame(function() {
-      ripple.style.transform = 'scale(1.8)';
+      ripple.style.transform = 'scale(2.2)';
       ripple.style.opacity = '0';
     });
     setTimeout(function() {
@@ -1058,11 +1191,8 @@ async function startServer() {
     if (!data || !data.type) return;
 
     if (data.type === 'SET_INSPECTOR_MODE') {
-      isInspectorActive = !!data.active;
-      if (!isInspectorActive && hoverOverlay) {
-        hoverOverlay.style.display = 'none';
-      }
-      console.log('[AutoClicker] Inspector mode active:', isInspectorActive);
+      setInspectorState(!!data.active);
+      console.log('[AutoClicker] Inspector mode set to:', !!data.active);
     } else if (data.type === 'EXECUTE_STEP') {
       executeStep(data.step);
     } else if (data.type === 'HIGHLIGHT_TARGET') {
@@ -1077,11 +1207,14 @@ async function startServer() {
 
   document.addEventListener('mousemove', onMouseMove, true);
 
-  // Notify parent that runtime is fully connected
+  // Notify parent that runtime is fully connected and ask for initial inspector state
   try {
     window.parent.postMessage({
       type: 'RUNTIME_READY',
       url: window.__AUTOCLICKER_TARGET_URL__
+    }, '*');
+    window.parent.postMessage({
+      type: 'REQUEST_INSPECTOR_STATE'
     }, '*');
   } catch(e) {}
 
@@ -1099,6 +1232,9 @@ async function startServer() {
       .replace(/top\.location\.href\s*=\s*location\.href/gi, '/* neutralized */')
       .replace(/if\s*\(\s*(window\.)?top\s*!==\s*(window\.)?self\s*\)/gi, 'if(false)')
       .replace(/if\s*\(\s*(window\.)?top\.location\s*!==\s*(window\.)?location\s*\)/gi, 'if(false)')
+      .replace(/target\s*=\s*["']_top["']/gi, 'target="_self"')
+      .replace(/target\s*=\s*["']_parent["']/gi, 'target="_self"')
+      .replace(/target\s*=\s*["']_blank["']/gi, 'target="_self"')
       .replace(/<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '')
       .replace(/<meta[^>]*http-equiv=["']X-Frame-Options["'][^>]*>/gi, '');
 
@@ -1211,81 +1347,115 @@ async function startServer() {
       return next();
     }
 
-    // Check if the request was initiated from within our /api/proxy iframe
-    const referer = (req.headers.referer || req.headers.referrer) as string | undefined;
-    const isFromProxyIframe = typeof referer === 'string' && referer.includes('/api/proxy?url=');
+    // 1. Vite & internal application dev assets
+    const isInternalAsset =
+      req.path.startsWith('/src/') ||
+      req.path.startsWith('/@') ||
+      req.path.startsWith('/node_modules/') ||
+      req.path.startsWith('/api/') ||
+      req.path.endsWith('.tsx') ||
+      req.path.endsWith('.ts') ||
+      req.path.endsWith('.vite') ||
+      req.path === '/favicon.ico' ||
+      req.path === '/robots.txt';
 
-    // Only allow Vite/SPA root routes if NOT initiated from within the proxy iframe
-    if (!isFromProxyIframe) {
-      if (
-        req.path.startsWith('/src/') ||
-        req.path.startsWith('/@') ||
-        req.path.startsWith('/node_modules/') ||
-        req.path === '/' ||
-        req.path === '/index.html' ||
-        req.path.endsWith('.tsx') ||
-        req.path.endsWith('.ts')
-      ) {
-        return next();
+    if (isInternalAsset) {
+      return next();
+    }
+
+    // 2. Identify target origin from referer, cookie, or global memory
+    let targetOrigin: string | null = null;
+    let targetUrlParam: string | null = null;
+
+    const referer = (req.headers.referer || req.headers.referrer) as string | undefined;
+    if (typeof referer === 'string' && referer.includes('/api/proxy?url=')) {
+      try {
+        const refUrl = new URL(referer);
+        targetUrlParam = refUrl.searchParams.get('url');
+        if (targetUrlParam) {
+          targetOrigin = new URL(targetUrlParam).origin;
+        }
+      } catch (err) {}
+    }
+
+    if (!targetOrigin) {
+      const cookieHeader = req.headers.cookie || '';
+      const m = cookieHeader.match(/__autoclicker_target_origin=([^;]+)/);
+      if (m) {
+        try { targetOrigin = decodeURIComponent(m[1]); } catch(e) {}
       }
     }
 
-    if (isFromProxyIframe) {
+    if (!targetOrigin && activeProxyTargetOrigin) {
+      targetOrigin = activeProxyTargetOrigin;
+    }
+
+    // 3. If root path '/' or '/index.html' AND NOT an iframe navigation, serve the main app
+    const isIframeRequest = req.headers['sec-fetch-dest'] === 'iframe' || req.headers['sec-fetch-dest'] === 'empty';
+    if ((req.path === '/' || req.path === '/index.html') && !isIframeRequest && !referer?.includes('/api/proxy')) {
+      return next();
+    }
+
+    // 4. If we know the target origin, proxy this foreign path
+    if (targetOrigin) {
       try {
-        const refUrl = new URL(referer!);
-        const targetUrlParam = refUrl.searchParams.get('url');
-        if (targetUrlParam) {
-          const targetOrigin = new URL(targetUrlParam).origin;
-          const targetFullUrl = new URL(req.originalUrl, targetOrigin);
+        const targetFullUrl = new URL(req.originalUrl, targetOrigin);
 
-          // Prevent proxying to self
-          if (req.headers.host && targetFullUrl.host.toLowerCase() === req.headers.host.toLowerCase()) {
-            return next();
-          }
+        // Prevent proxying to self
+        const myHost = (req.headers.host || '').toLowerCase();
+        if (myHost && targetFullUrl.host.toLowerCase() === myHost) {
+          return next();
+        }
 
-          const headers: Record<string, string> = {
-            'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-            'Accept': (req.headers.accept as string) || '*/*',
-            'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
-            'Origin': targetOrigin,
-            'Referer': targetUrlParam,
-          };
-
-          const cType = req.headers['content-type'];
-          if (cType) headers['content-type'] = cType;
-
-          const body = getRequestBody(req);
-
-          const { response: proxiedRes, finalUrl } = await fetchWithRedirectsAndCookies(
-            targetFullUrl,
-            req.method,
-            headers,
-            body
-          );
-
-          res.status(proxiedRes.status);
-          const resCType = proxiedRes.headers.get('content-type') || '';
-          if (resCType) res.setHeader('Content-Type', resCType);
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-          const setCookies = getSetCookies(proxiedRes.headers);
-          if (setCookies.length > 0) {
-            applySetCookiesToResponse(res, setCookies);
-          }
-
-          if (resCType.includes('text/html')) {
-            let html = await proxiedRes.text();
-            const proxyOrigin = `${req.protocol}://${req.headers.host || 'localhost:3000'}`;
-            html = injectScriptsIntoHtml(html, finalUrl, proxyOrigin);
-            res.send(html);
-            return;
-          }
-
-          const buffer = await proxiedRes.arrayBuffer();
-          res.send(Buffer.from(buffer));
+        // If the request is an HTML page navigation (e.g. GET /login accepting text/html), 302 redirect to /api/proxy
+        const acceptsHtml = (req.headers.accept || '').includes('text/html');
+        if (req.method === 'GET' && acceptsHtml && !req.path.includes('.')) {
+          res.redirect(302, `/api/proxy?url=${encodeURIComponent(targetFullUrl.href)}`);
           return;
         }
+
+        const headers: Record<string, string> = {
+          'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+          'Accept': (req.headers.accept as string) || '*/*',
+          'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
+          'Origin': targetOrigin,
+          'Referer': targetUrlParam || targetOrigin,
+        };
+
+        const cType = req.headers['content-type'];
+        if (cType) headers['content-type'] = cType;
+
+        const body = getRequestBody(req);
+
+        const { response: proxiedRes, finalUrl } = await fetchWithRedirectsAndCookies(
+          targetFullUrl,
+          req.method,
+          headers,
+          body
+        );
+
+        res.status(proxiedRes.status);
+        const resCType = proxiedRes.headers.get('content-type') || '';
+        if (resCType) res.setHeader('Content-Type', resCType);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+        const setCookies = getSetCookies(proxiedRes.headers);
+        if (setCookies.length > 0) {
+          applySetCookiesToResponse(res, setCookies);
+        }
+
+        if (resCType.includes('text/html')) {
+          let html = await proxiedRes.text();
+          const proxyOrigin = `${req.protocol}://${req.headers.host || 'localhost:3000'}`;
+          html = injectScriptsIntoHtml(html, finalUrl, proxyOrigin);
+          res.send(html);
+          return;
+        }
+
+        const buffer = await proxiedRes.arrayBuffer();
+        res.send(Buffer.from(buffer));
+        return;
       } catch (err) {
         // Fallback to next
       }
@@ -1346,6 +1516,13 @@ async function startServer() {
         headers,
         body
       );
+
+      // Track the active target in server memory & response cookies
+      activeProxyTargetOrigin = finalUrl.origin;
+      activeProxyTargetUrl = finalUrl.href;
+
+      res.append('Set-Cookie', `__autoclicker_target_origin=${encodeURIComponent(finalUrl.origin)}; Path=/; SameSite=Lax`);
+      res.append('Set-Cookie', `__autoclicker_target_url=${encodeURIComponent(finalUrl.href)}; Path=/; SameSite=Lax`);
 
       const contentType = response.headers.get('content-type') || '';
       res.status(response.status);

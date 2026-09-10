@@ -129,7 +129,7 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
     const handleMessage = (e: MessageEvent) => {
       if (e.data?.type === 'SWITCH_TO_SANDBOX') {
         onUrlChange('sandbox');
-      } else if (e.data?.type === 'RUNTIME_READY') {
+      } else if (e.data?.type === 'RUNTIME_READY' || e.data?.type === 'REQUEST_INSPECTOR_STATE') {
         setIsRuntimeConnected(true);
         if (iframeRef.current && iframeRef.current.contentWindow) {
           try {
@@ -360,13 +360,13 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
             onClick={handleToggleInspector}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
               isInspectorMode
-                ? 'bg-amber-500 text-slate-950 ring-2 ring-amber-400/50 shadow-lg shadow-amber-500/20 animate-pulse'
+                ? 'bg-amber-400 text-slate-950 ring-2 ring-amber-300 shadow-lg shadow-amber-500/25 animate-pulse'
                 : 'bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700'
             }`}
-            title="Включить режим прицела для выбора кнопок и полей кликом"
+            title="Включить режим прицела для выбора кнопок и полей кликом без перехода"
           >
             <Crosshair className={`w-4 h-4 ${isInspectorMode ? 'text-slate-950 rotate-45' : 'text-amber-400'}`} />
-            <span>{isInspectorMode ? 'Прицел активен' : 'Выбрать цель'}</span>
+            <span>{isInspectorMode ? '🎯 Прицел включен' : '🎯 Выбрать цель'}</span>
           </button>
 
           {/* Device viewport switch (Mobile vs Desktop) */}
@@ -556,20 +556,24 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
       {isInspectorMode && (
         <div 
           id="inspector-mode-alert"
-          className="bg-amber-500/15 border-b border-amber-500/30 px-3 py-1.5 flex items-center justify-between text-xs text-amber-300 font-medium animate-fadeIn shrink-0"
+          className="bg-amber-500/20 border-b border-amber-500/40 px-3 py-2 flex items-center justify-between text-xs text-amber-200 font-medium animate-fadeIn shrink-0 shadow-inner"
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-2.5 w-2.5 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+            </span>
             <Crosshair className="w-4 h-4 text-amber-400 animate-spin" />
             <span>
-              <strong>Режим выбора цели включен:</strong> Наведите курсор на нужную кнопку или ссылку и нажмите ее. Селектор добавится в очередь автокликера.
+              <strong className="text-amber-300 font-bold">Режим прицела активен:</strong> Наведите курсор и кликните на любую кнопку, поле или ссылку. Ссылка <strong>не перейдет</strong>, а элемент добавится в очередь автокликера.
             </span>
           </div>
           <button
             type="button"
             onClick={onToggleInspector}
-            className="px-2 py-0.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded text-[11px] transition-colors cursor-pointer"
+            className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs transition-colors cursor-pointer shadow"
           >
-            Готово
+            Завершить выбор
           </button>
         </div>
       )}

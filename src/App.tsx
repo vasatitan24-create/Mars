@@ -136,31 +136,6 @@ export default function App() {
     ? Math.round((totalClicks / elapsedSeconds) * 60) 
     : 0;
 
-  // Handle postMessage events from the proxied target website iframe
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      const data = event.data;
-      if (!data || !data.type) return;
-
-      if (data.type === 'TARGET_PICKED') {
-        const target: PickedTargetEvent = data.target;
-        handleTargetPicked(target);
-      } else if (data.type === 'PAGE_STATUS') {
-        setIsPageBusy(!!data.isBusy);
-        setActiveRequests(data.pendingRequests || 0);
-        if (data.readyState) setPageReadyState(data.readyState);
-      } else if (data.type === 'STEP_RESULT') {
-        if (stepPromiseResolverRef.current) {
-          stepPromiseResolverRef.current(data.success);
-          stepPromiseResolverRef.current = null;
-        }
-      }
-    };
-
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [currentMacro]);
-
   // Handle Target Picked by Visual Inspector (from iframe or sandbox)
   const handleTargetPicked = useCallback((target: PickedTargetEvent) => {
     const label = target.text 
@@ -187,9 +162,35 @@ export default function App() {
       steps: [...prev.steps, newStep]
     }));
 
-    addLog('success', `🎯 Добавлена новая цель: ${newStep.label} (${target.selector})`);
-    setIsInspectorMode(false);
-  }, [addLog]);
+    addLog('success', `🎯 Добавлена новая цель #${(currentMacro?.steps?.length || 0) + 1}: ${newStep.label} (${target.selector})`);
+  }, [addLog, currentMacro]);
+
+  // Handle postMessage events from the proxied target website iframe
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || !data.type) return;
+
+      if (data.type === 'TARGET_PICKED') {
+        const target: PickedTargetEvent = data.target;
+        handleTargetPicked(target);
+      } else if (data.type === 'TOGGLE_INSPECTOR') {
+        setIsInspectorMode(!!data.active);
+      } else if (data.type === 'PAGE_STATUS') {
+        setIsPageBusy(!!data.isBusy);
+        setActiveRequests(data.pendingRequests || 0);
+        if (data.readyState) setPageReadyState(data.readyState);
+      } else if (data.type === 'STEP_RESULT') {
+        if (stepPromiseResolverRef.current) {
+          stepPromiseResolverRef.current(data.success);
+          stepPromiseResolverRef.current = null;
+        }
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [currentMacro, handleTargetPicked]);
 
   // Execute a single step in sandbox or iframe
   const executeStep = async (step: MacroStep): Promise<boolean> => {
