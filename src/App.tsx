@@ -5,7 +5,7 @@ import { TargetSequencePanel } from './components/TargetSequencePanel';
 import { ControlsBar } from './components/ControlsBar';
 import { StatsAndLogsPanel } from './components/StatsAndLogsPanel';
 import { MacroManagerModal } from './components/MacroManagerModal';
-import { ApkBuildModal } from './components/ApkBuildModal';
+import { FloatingAutoClickerOverlay } from './components/FloatingAutoClickerOverlay';
 import { DEFAULT_MACROS } from './defaultMacros';
 import { 
   MacroConfig, 
@@ -15,6 +15,7 @@ import {
   LogEntry, 
   PickedTargetEvent 
 } from './types';
+import { PanelRightClose, PanelRightOpen, Maximize2 } from 'lucide-react';
 
 const STORAGE_SAVED_MACROS_KEY = 'autoclicker_saved_macros_v2';
 const STORAGE_CURRENT_MACRO_KEY = 'autoclicker_current_macro_v2';
@@ -44,9 +45,10 @@ export default function App() {
     return DEFAULT_MACROS[0];
   });
 
-  // Modals state
+  // Modals and view state
   const [isMacroModalOpen, setIsMacroModalOpen] = useState(false);
-  const [isApkModalOpen, setIsApkModalOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   // Inspector element picker state
   const [isInspectorMode, setIsInspectorMode] = useState(false);
@@ -460,29 +462,67 @@ export default function App() {
         status={status}
         savedMacrosCount={savedMacros.length}
         onOpenMacroManager={() => setIsMacroModalOpen(true)}
-        onOpenApkModal={() => setIsApkModalOpen(true)}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={() => setIsFullscreen(prev => !prev)}
         networkPingMs={networkPingMs}
       />
 
       {/* Main Workspace Layout */}
-      <main id="app-main-workspace" className="flex-1 p-3 md:p-4 max-w-[1700px] w-full mx-auto flex flex-col gap-3">
+      <main id="app-main-workspace" className="flex-1 p-3 md:p-4 max-w-[1800px] w-full mx-auto flex flex-col gap-3">
         {/* Top Controls Bar: Start/Pause/Stop, Timing Mode, Speed Multiplier */}
-        <ControlsBar
-          config={currentMacro}
-          onUpdateConfig={(updates) => setCurrentMacro(prev => ({ ...prev, ...updates }))}
-          status={status}
-          onStart={startMacro}
-          onPause={pauseMacro}
-          onResume={resumeMacro}
-          onStop={stopMacro}
-          onStepNext={stepNext}
-          networkPingMs={networkPingMs}
-        />
+        {!isFullscreen && (
+          <ControlsBar
+            config={currentMacro}
+            onUpdateConfig={(updates) => setCurrentMacro(prev => ({ ...prev, ...updates }))}
+            status={status}
+            onStart={startMacro}
+            onPause={pauseMacro}
+            onResume={resumeMacro}
+            onStop={stopMacro}
+            onStepNext={stepNext}
+            networkPingMs={networkPingMs}
+          />
+        )}
+
+        {/* Panel size toggle bar */}
+        {!isFullscreen && (
+          <div className="flex items-center justify-between px-1 text-xs text-slate-400">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-slate-300">Рабочая область:</span>
+              <span className="text-[11px] text-slate-500">
+                {isSidebarCollapsed ? 'Фрейм развернут на 100% ширины' : 'Разделенный вид (Браузер + Цели)'}
+              </span>
+            </div>
+            <button
+              type="button"
+              id="toggle-sidebar-collapse-btn"
+              onClick={() => setIsSidebarCollapsed(prev => !prev)}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 hover:bg-slate-850 text-slate-300 hover:text-white rounded-lg border border-slate-800 transition-colors cursor-pointer text-[11px] font-medium"
+            >
+              {isSidebarCollapsed ? (
+                <>
+                  <PanelRightOpen className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Показать панель целей и логов</span>
+                </>
+              ) : (
+                <>
+                  <PanelRightClose className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Скрыть панель (Фрейм на всю ширину)</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
 
         {/* Workspace Split: Browser Viewer (Left) & Macro Steps + Logs (Right) */}
-        <div id="workspace-columns-grid" className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 min-h-[640px]">
+        <div 
+          id="workspace-columns-grid" 
+          className={`flex-1 grid grid-cols-1 ${
+            isSidebarCollapsed ? 'lg:grid-cols-1' : 'lg:grid-cols-12'
+          } gap-3 min-h-[calc(100vh-230px)]`}
+        >
           {/* Left / Center Column: Interactive Browser Viewer (Sandbox or Proxied Website) */}
-          <div className="lg:col-span-7 xl:col-span-8 flex flex-col h-full min-h-[500px]">
+          <div className={`${isSidebarCollapsed ? 'lg:col-span-1' : 'lg:col-span-7 xl:col-span-8'} flex flex-col h-full min-h-[550px]`}>
             <BrowserView
               url={currentMacro.targetUrl}
               onUrlChange={(newUrl) => setCurrentMacro(prev => ({ ...prev, targetUrl: newUrl }))}
@@ -492,48 +532,73 @@ export default function App() {
               iframeRef={iframeRef}
               isPageBusy={isPageBusy}
               activeRequests={activeRequests}
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={() => setIsFullscreen(prev => !prev)}
             />
           </div>
 
-          {/* Right Column: Sequence Steps List & Real-time Logs Terminal */}
-          <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-3 h-full">
-            {/* Target Sequence Panel */}
-            <div className="flex-1 min-h-[340px]">
-              <TargetSequencePanel
-                steps={currentMacro.steps}
-                onUpdateSteps={(steps) => setCurrentMacro(prev => ({ ...prev, steps }))}
-                activeStepIndex={activeStepIndex}
-                isExecuting={status === 'running' || status === 'paused'}
-                onTestStep={testSingleStep}
-                onToggleInspector={() => setIsInspectorMode(!isInspectorMode)}
-                isInspectorMode={isInspectorMode}
-              />
-            </div>
+          {/* Right Column: Sequence Steps List & Real-time Logs Terminal (hidden if collapsed or fullscreen) */}
+          {!isSidebarCollapsed && !isFullscreen && (
+            <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-3 h-full">
+              {/* Target Sequence Panel */}
+              <div className="flex-1 min-h-[340px]">
+                <TargetSequencePanel
+                  steps={currentMacro.steps}
+                  onUpdateSteps={(steps) => setCurrentMacro(prev => ({ ...prev, steps }))}
+                  activeStepIndex={activeStepIndex}
+                  isExecuting={status === 'running' || status === 'paused'}
+                  onTestStep={testSingleStep}
+                  onToggleInspector={() => setIsInspectorMode(!isInspectorMode)}
+                  isInspectorMode={isInspectorMode}
+                />
+              </div>
 
-            {/* Live Stats & Logs Panel */}
-            <div className="h-[250px] shrink-0">
-              <StatsAndLogsPanel
-                stats={{
-                  status,
-                  currentStepIndex: activeStepIndex ?? 0,
-                  currentLoop,
-                  totalLoops: currentMacro.loopCount,
-                  totalClicks,
-                  startTime,
-                  elapsedSeconds,
-                  clicksPerMinute,
-                  networkPingMs,
-                  isPageBusy,
-                  pageReadyState,
-                  activeRequests,
-                }}
-                logs={logs}
-                onClearLogs={() => setLogs([])}
-              />
+              {/* Live Stats & Logs Panel */}
+              <div className="h-[250px] shrink-0">
+                <StatsAndLogsPanel
+                  stats={{
+                    status,
+                    currentStepIndex: activeStepIndex ?? 0,
+                    currentLoop,
+                    totalLoops: currentMacro.loopCount,
+                    totalClicks,
+                    startTime,
+                    elapsedSeconds,
+                    clicksPerMinute,
+                    networkPingMs,
+                    isPageBusy,
+                    pageReadyState,
+                    activeRequests,
+                  }}
+                  logs={logs}
+                  onClearLogs={() => setLogs([])}
+                />
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </main>
+
+      {/* Floating Auto-Clicker Widget Overlay when in Fullscreen Mode */}
+      {isFullscreen && (
+        <FloatingAutoClickerOverlay
+          status={status}
+          onStart={startMacro}
+          onPause={pauseMacro}
+          onResume={resumeMacro}
+          onStop={stopMacro}
+          onStepNext={stepNext}
+          activeStepIndex={activeStepIndex}
+          steps={currentMacro.steps}
+          totalClicks={totalClicks}
+          currentLoop={currentLoop}
+          totalLoops={currentMacro.loopCount}
+          isInspectorMode={isInspectorMode}
+          onToggleInspector={() => setIsInspectorMode(!isInspectorMode)}
+          onExitFullscreen={() => setIsFullscreen(false)}
+          networkPingMs={networkPingMs}
+        />
+      )}
 
       {/* Macro Manager Modal (Save / Load / Export / Import) */}
       <MacroManagerModal
@@ -545,12 +610,6 @@ export default function App() {
         onLoadMacro={handleLoadMacro}
         onDeleteMacro={handleDeleteMacro}
         onImportMacros={handleImportMacros}
-      />
-
-      {/* GitHub APK Build Modal */}
-      <ApkBuildModal
-        isOpen={isApkModalOpen}
-        onClose={() => setIsApkModalOpen(false)}
       />
     </div>
   );

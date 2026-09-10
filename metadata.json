@@ -1,6 +1,6 @@
 {
   "name": "Web Auto Clicker & Macro Runner",
-  "description": "Автокликер для сайтов с визуальным выбором целей, адаптивной скоростью под интернет, сохранением макросов и сборкой APK через GitHub Actions.",
+  "description": "Многоцелевой автокликер для сайтов с визуальным выбором целей, адаптацией под скорость сети, полноэкранным режимом и сохранением макросов.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

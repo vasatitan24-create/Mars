@@ -407,6 +407,55 @@ async function startServer() {
     `);
   });
 
+  // Intercept subresource or relative requests made by pages inside the proxy iframe
+  app.use(async (req: Request, res: Response, next) => {
+    // If it's a known app route or asset, skip
+    if (
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/src/') ||
+      req.path.startsWith('/@') ||
+      req.path.startsWith('/node_modules/') ||
+      req.path === '/' ||
+      req.path === '/index.html' ||
+      req.path.endsWith('.tsx') ||
+      req.path.endsWith('.ts')
+    ) {
+      return next();
+    }
+
+    // Check if the request was initiated from within our /api/proxy iframe
+    const referer = req.headers.referer || req.headers.referrer;
+    if (typeof referer === 'string' && referer.includes('/api/proxy?url=')) {
+      try {
+        const refUrl = new URL(referer);
+        const targetUrlParam = refUrl.searchParams.get('url');
+        if (targetUrlParam) {
+          const targetOrigin = new URL(targetUrlParam).origin;
+          const targetFullUrl = `${targetOrigin}${req.originalUrl}`;
+          
+          const proxiedRes = await fetch(targetFullUrl, {
+            headers: {
+              'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+              'Accept': (req.headers.accept as string) || '*/*',
+              'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
+            }
+          });
+
+          const cType = proxiedRes.headers.get('content-type') || '';
+          if (cType) res.setHeader('Content-Type', cType);
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          const buffer = await proxiedRes.arrayBuffer();
+          res.send(Buffer.from(buffer));
+          return;
+        }
+      } catch (err) {
+        // Continue to next if parsing fails
+      }
+    }
+
+    next();
+  });
+
   // Proxy endpoint to load external websites without CSP/X-Frame-Options blocks
   app.get('/api/proxy', async (req: Request, res: Response) => {
     const targetUrl = req.query.url as string;
@@ -425,18 +474,22 @@ async function startServer() {
 
     try {
       const response = await fetch(parsedUrl.href, {
+        redirect: 'follow',
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 14; Mobile; rv:128.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-          'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8'
+          'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
+          'Upgrade-Insecure-Requests': '1',
         }
       });
 
+      const finalUrl = new URL(response.url || parsedUrl.href);
       const contentType = response.headers.get('content-type') || '';
       
       // If not HTML (e.g. image, css, script), pipe the binary or text through
       if (!contentType.includes('text/html')) {
         res.setHeader('Content-Type', contentType);
+        res.setHeader('Access-Control-Allow-Origin', '*');
         const buffer = await response.arrayBuffer();
         res.send(Buffer.from(buffer));
         return;
@@ -445,36 +498,95 @@ async function startServer() {
       let html = await response.text();
 
       // Inject base tag so relative links and assets resolve to target host
-      const baseTag = `<base href="${parsedUrl.origin}${parsedUrl.pathname}">`;
+      const baseTag = `<base href="${finalUrl.origin}${finalUrl.pathname}">`;
+      
+      // Anti-frame-busting guard and click interceptor to prevent iframe breakouts
+      const antiBusterScript = `
+<script>
+(function() {
+  try {
+    Object.defineProperty(window, 'top', { get: function() { return window.self; }, set: function() {}, configurable: true });
+    Object.defineProperty(window, 'parent', { get: function() { return window.self; }, set: function() {}, configurable: true });
+  } catch(e) {}
+
+  document.addEventListener('click', function(e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+      if (!a.href.includes('/api/proxy?url=')) {
+        e.preventDefault();
+        window.location.href = '/api/proxy?url=' + encodeURIComponent(a.href);
+      }
+    }
+  }, true);
+})();
+</script>`;
+
       const runtimeScript = `<script src="/api/injected-runtime.js"></script>`;
 
-      // Strip existing CSP meta tags to prevent script blocks
-      html = html.replace(/<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
+      // Neutralize common inline frame-busting scripts in HTML
+      html = html
+        .replace(/top\.location\s*=\s*self\.location/gi, '/* neutralized */')
+        .replace(/top\.location\.href\s*=\s*location\.href/gi, '/* neutralized */')
+        .replace(/if\s*\(\s*(window\.)?top\s*!==\s*(window\.)?self\s*\)/gi, 'if(false)')
+        .replace(/if\s*\(\s*(window\.)?top\.location\s*!==\s*(window\.)?location\s*\)/gi, 'if(false)')
+        .replace(/<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '')
+        .replace(/<meta[^>]*http-equiv=["']X-Frame-Options["'][^>]*>/gi, '');
 
-      // Inject base tag and our runtime script into <head> or at start
+      // Inject guard, base tag, and runtime script into <head> or at start
       if (html.includes('<head>')) {
-        html = html.replace('<head>', `<head>${baseTag}${runtimeScript}`);
+        html = html.replace('<head>', `<head>${baseTag}${antiBusterScript}${runtimeScript}`);
       } else if (html.includes('<html>')) {
-        html = html.replace('<html>', `<html><head>${baseTag}${runtimeScript}</head>`);
+        html = html.replace('<html>', `<html><head>${baseTag}${antiBusterScript}${runtimeScript}</head>`);
       } else {
-        html = `${baseTag}${runtimeScript}${html}`;
+        html = `${baseTag}${antiBusterScript}${runtimeScript}${html}`;
       }
 
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      // Explicitly allow embedding in iframe
       res.removeHeader('X-Frame-Options');
       res.removeHeader('Content-Security-Policy');
+      res.removeHeader('Content-Security-Policy-Report-Only');
+      res.removeHeader('Cross-Origin-Opener-Policy');
+      res.removeHeader('Cross-Origin-Embedder-Policy');
       res.setHeader('Access-Control-Allow-Origin', '*');
 
       res.send(html);
     } catch (err: any) {
       res.status(502).send(`
-        <div style="font-family: sans-serif; padding: 24px; text-align: center; color: #ef4444; background: #0f172a; min-height: 100vh;">
-          <h2 style="color: #f87171;">Ошибка загрузки сайта</h2>
-          <p style="color: #94a3b8;">Не удалось подключиться к ${parsedUrl.href}</p>
-          <pre style="background: #1e293b; color: #cbd5e1; padding: 12px; border-radius: 8px; max-width: 600px; margin: 16px auto; font-size: 13px;">${err?.message || 'Network error'}</pre>
-          <p style="color: #64748b; font-size: 13px;">Проверьте правильность URL или воспользуйтесь встроенным интерактивным тестовым полигоном.</p>
-        </div>
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+          <meta charset="UTF-8">
+          <title>Сайт защищен или недоступен для прямого фрейма</title>
+          <style>
+            body { margin: 0; padding: 32px 16px; font-family: system-ui, -apple-system, sans-serif; background: #090d16; color: #e2e8f0; display: flex; align-items: center; justify-content: center; min-height: 80vh; }
+            .card { max-width: 540px; background: #111827; border: 1px solid #1f2937; border-radius: 20px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.5); text-align: center; }
+            h2 { color: #f87171; margin-top: 0; font-size: 20px; }
+            p { color: #94a3b8; font-size: 14px; line-height: 1.6; }
+            .badge { display: inline-block; background: #1e293b; color: #cbd5e1; font-family: monospace; font-size: 12px; padding: 6px 12px; border-radius: 8px; margin: 12px 0; word-break: break-all; }
+            .actions { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+            button, a { display: inline-block; text-decoration: none; padding: 12px 18px; border-radius: 12px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; }
+            .btn-primary { background: #2563eb; color: #ffffff; }
+            .btn-primary:hover { background: #1d4ed8; }
+            .btn-secondary { background: #1f2937; color: #e2e8f0; border: 1px solid #374151; }
+            .btn-secondary:hover { background: #374151; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h2>🛡️ Сайт защищен от отображения во фрейме</h2>
+            <p>Сайт <strong>${parsedUrl.hostname}</strong> использует защитные механизмы (Cloudflare, строгий CSP или авторизацию), блокирующие прокси-сервер.</p>
+            <div class="badge">${err?.message || 'ERR_CONNECTION_REFUSED'}</div>
+            <div class="actions">
+              <a href="${parsedUrl.href}" target="_blank" rel="noopener noreferrer" class="btn-primary">
+                ↗ Открыть ${parsedUrl.hostname} в отдельном окне
+              </a>
+              <button onclick="window.parent.postMessage({ type: 'SWITCH_TO_SANDBOX' }, '*')" class="btn-secondary">
+                ⭐ Вернуться в интерактивный полигон автокликера
+              </button>
+            </div>
+          </div>
+        </body>
+        </html>
       `);
     }
   });

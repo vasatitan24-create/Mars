@@ -1,12 +1,11 @@
 import React from 'react';
 import { 
   Zap, 
-  Smartphone, 
   FolderOpen, 
   Activity, 
   Wifi, 
-  Settings,
-  Sparkles,
+  Maximize2,
+  Minimize2,
   MousePointerClick
 } from 'lucide-react';
 import { ExecutionStatus } from '../types';
@@ -15,7 +14,8 @@ interface HeaderProps {
   status: ExecutionStatus;
   savedMacrosCount: number;
   onOpenMacroManager: () => void;
-  onOpenApkModal: () => void;
+  isFullscreen: boolean;
+  onToggleFullscreen: () => void;
   networkPingMs: number;
 }
 
@@ -23,7 +23,8 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   savedMacrosCount,
   onOpenMacroManager,
-  onOpenApkModal,
+  isFullscreen,
+  onToggleFullscreen,
   networkPingMs,
 }) => {
   const getStatusBadge = () => {
@@ -69,11 +70,11 @@ export const Header: React.FC<HeaderProps> = ({
               Web Auto Clicker
             </h1>
             <span className="text-[10px] font-mono px-1.5 py-0.2 bg-blue-500/10 text-blue-400 rounded border border-blue-500/20">
-              v2.4 Pro
+              v2.5 Pro
             </span>
           </div>
           <p className="text-[11px] text-slate-400 hidden sm:block">
-            Многоцелевой автокликер с адаптацией к скорости сети и сборкой APK
+            Многоцелевой веб-автокликер с адаптацией к скорости сети и полноэкранным режимом
           </p>
         </div>
 
@@ -82,7 +83,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Header Actions: Macro Manager & APK GitHub Build */}
+      {/* Header Actions: Macro Manager & Fullscreen Toggle */}
       <div className="flex items-center gap-2">
         {/* Saved Macros Button */}
         <button
@@ -98,15 +99,29 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
         </button>
 
-        {/* GitHub APK Build Modal Trigger Button */}
+        {/* Fullscreen Viewer Toggle Button */}
         <button
-          id="header-apk-build-btn"
+          id="header-fullscreen-toggle-btn"
           type="button"
-          onClick={onOpenApkModal}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+          onClick={onToggleFullscreen}
+          className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            isFullscreen 
+              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20' 
+              : 'bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700'
+          }`}
+          title={isFullscreen ? 'Выйти из полноэкранного режима' : 'Развернуть фрейм на весь экран'}
         >
-          <Smartphone className="w-4 h-4" />
-          <span>Сборка APK (GitHub)</span>
+          {isFullscreen ? (
+            <>
+              <Minimize2 className="w-4 h-4 text-blue-200" />
+              <span>Свернуть</span>
+            </>
+          ) : (
+            <>
+              <Maximize2 className="w-4 h-4 text-cyan-400" />
+              <span>На весь экран</span>
+            </>
+          )}
         </button>
       </div>
     </header>
