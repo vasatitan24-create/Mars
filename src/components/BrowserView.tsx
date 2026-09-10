@@ -122,16 +122,33 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isFullscreen, onToggleFullscreen]);
 
-  // Listen for iframe fallback messages
+  // Listen for iframe fallback and runtime ready messages
+  const [isRuntimeConnected, setIsRuntimeConnected] = useState(false);
+
   useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
       if (e.data?.type === 'SWITCH_TO_SANDBOX') {
         onUrlChange('sandbox');
+      } else if (e.data?.type === 'RUNTIME_READY') {
+        setIsRuntimeConnected(true);
+        if (iframeRef.current && iframeRef.current.contentWindow) {
+          try {
+            iframeRef.current.contentWindow.postMessage({
+              type: 'SET_INSPECTOR_MODE',
+              active: isInspectorMode,
+            }, '*');
+          } catch (err) {}
+        }
       }
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [onUrlChange]);
+  }, [onUrlChange, isInspectorMode, iframeRef]);
+
+  // Reset runtime connected state when url changes
+  useEffect(() => {
+    setIsRuntimeConnected(false);
+  }, [url]);
 
   const handleNavigate = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -162,6 +179,13 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
       }
     }
   }, [isInspectorMode, iframeRef]);
+
+  const handleToggleInspector = () => {
+    if (!isInspectorMode && frameMode === 'direct') {
+      setFrameMode('proxy');
+    }
+    onToggleInspector();
+  };
 
   // Determine iframe src according to chosen connection mode
   const getIframeSrc = () => {
@@ -313,17 +337,33 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
 
         {/* Toolbar Right Controls */}
         <div className="flex items-center gap-2">
+          {/* Status badge for injected runtime */}
+          {!isUsingSandbox && frameMode === 'proxy' && (
+            <div 
+              id="runtime-status-badge"
+              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors ${
+                isRuntimeConnected 
+                  ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60' 
+                  : 'bg-slate-900 text-slate-400 border border-slate-800'
+              }`}
+              title={isRuntimeConnected ? 'Инжектор подключен: выбор целей и авторизация активны' : 'Подключение инжектора...'}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${isRuntimeConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span>{isRuntimeConnected ? 'Инжектор готов' : 'Подключение...'}</span>
+            </div>
+          )}
+
           {/* Target Picker Toggle Button */}
           <button
             id="target-picker-toggle-btn"
             type="button"
-            onClick={onToggleInspector}
+            onClick={handleToggleInspector}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
               isInspectorMode
                 ? 'bg-amber-500 text-slate-950 ring-2 ring-amber-400/50 shadow-lg shadow-amber-500/20 animate-pulse'
                 : 'bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700'
             }`}
-            title="Включить режим прицела для выбора кнопок и ссылок кликом"
+            title="Включить режим прицела для выбора кнопок и полей кликом"
           >
             <Crosshair className={`w-4 h-4 ${isInspectorMode ? 'text-slate-950 rotate-45' : 'text-amber-400'}`} />
             <span>{isInspectorMode ? 'Прицел активен' : 'Выбрать цель'}</span>
@@ -613,7 +653,6 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
                 src={currentIframeSrc}
                 title="Target Website Viewer"
                 className="w-full h-full border-0 bg-white"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
                 referrerPolicy="no-referrer"
                 onLoad={() => {
                   setIsIframeLoading(false);
