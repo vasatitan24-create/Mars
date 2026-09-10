@@ -45,8 +45,6 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v3
       - run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          npx cap init "Web Auto Clicker" "com.autoclicker.macrorunner" --web-dir dist
           npx cap add android || true
           npx cap sync android
           cd android && chmod +x gradlew && ./gradlew assembleDebug
