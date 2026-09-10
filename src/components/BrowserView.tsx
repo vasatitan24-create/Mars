@@ -16,7 +16,9 @@ import {
   Zap,
   Layers,
   Copy,
-  Code
+  Code,
+  Lock,
+  Trash2
 } from 'lucide-react';
 import { InteractiveSandbox } from './InteractiveSandbox';
 import { PickedTargetEvent } from '../types';
@@ -55,6 +57,54 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
   const [isIframeLoading, setIsIframeLoading] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
   const [showBypassHelp, setShowBypassHelp] = useState(false);
+  const [cookieCount, setCookieCount] = useState<number>(0);
+  const [clearingCookies, setClearingCookies] = useState(false);
+
+  // Poll cookie status for current domain
+  const fetchCookieStatus = async () => {
+    if (!url || url === 'sandbox') return;
+    try {
+      const hostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname;
+      const res = await fetch(`/api/cookies/status?host=${encodeURIComponent(hostname)}`);
+      const data = await res.json();
+      if (data.ok) {
+        setCookieCount(data.cookiesCount || 0);
+      }
+    } catch(e) {}
+  };
+
+  useEffect(() => {
+    fetchCookieStatus();
+    const interval = setInterval(fetchCookieStatus, 3000);
+    return () => clearInterval(interval);
+  }, [url]);
+
+  const handleReloadPage = () => {
+    if (isUsingSandbox) {
+      setIsIframeLoading(true);
+      setTimeout(() => setIsIframeLoading(false), 200);
+    } else if (iframeRef.current) {
+      setIsIframeLoading(true);
+      iframeRef.current.src = currentIframeSrc;
+      setTimeout(() => setIsIframeLoading(false), 800);
+    }
+  };
+
+  const handleClearCookies = async () => {
+    setClearingCookies(true);
+    try {
+      let hostname = '';
+      if (url && url !== 'sandbox') {
+        hostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname;
+      }
+      await fetch(`/api/cookies/clear?host=${encodeURIComponent(hostname)}`, { method: 'POST' });
+      setCookieCount(0);
+      handleReloadPage();
+    } catch(e) {}
+    finally {
+      setClearingCookies(false);
+    }
+  };
 
   // Sync inputUrl when url prop changes externally (e.g. loading macro)
   useEffect(() => {
@@ -181,16 +231,7 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
             <button
               type="button"
               id="browser-reload-btn"
-              onClick={() => {
-                if (isUsingSandbox) {
-                  setIsIframeLoading(true);
-                  setTimeout(() => setIsIframeLoading(false), 200);
-                } else if (iframeRef.current) {
-                  setIsIframeLoading(true);
-                  iframeRef.current.src = currentIframeSrc;
-                  setTimeout(() => setIsIframeLoading(false), 800);
-                }
-              }}
+              onClick={handleReloadPage}
               className={`p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-200 transition-colors cursor-pointer ${
                 isIframeLoading ? 'animate-spin text-blue-400' : ''
               }`}
@@ -382,13 +423,36 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
 
         {/* Status & Unblock Info Button */}
         <div className="flex items-center gap-2">
+          {!isUsingSandbox && (
+            <div 
+              className="flex items-center gap-1.5 bg-slate-900/90 px-2 py-0.5 rounded-lg border border-slate-800 text-[11px]"
+              title="Сессионные куки сохраняются на сервере-туннеле для успешной авторизации"
+            >
+              <Lock className="w-3 h-3 text-blue-400" />
+              <span className="text-slate-300">
+                Сессия: <strong className="text-white font-mono">{cookieCount}</strong> куки
+              </span>
+              {cookieCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearCookies}
+                  disabled={clearingCookies}
+                  className="ml-1 p-0.5 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors cursor-pointer"
+                  title="Очистить куки и сбросить сессию входа"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          )}
+
           {isPageBusy ? (
-            <span className="inline-flex items-center gap-1 text-amber-400 font-mono">
+            <span className="inline-flex items-center gap-1 text-amber-400 font-mono text-[11px]">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
-              Сеть активна ({activeRequests} зап.)
+              Сеть активна ({activeRequests})
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1 text-emerald-400 font-mono">
+            <span className="inline-flex items-center gap-1 text-emerald-400 font-mono text-[11px]">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               Страница готова
             </span>
@@ -399,10 +463,10 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
               type="button"
               onClick={() => setShowBypassHelp(!showBypassHelp)}
               className="text-[11px] text-slate-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer"
-              title="Что делать, если сайт блокирует фрейм"
+              title="Что делать, если сайт блокирует фрейм или форму входа"
             >
               <AlertTriangle className="w-3 h-3 text-amber-400" />
-              <span>Защита от фрейма?</span>
+              <span>Справка</span>
             </button>
           )}
 
@@ -411,7 +475,7 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+              className="inline-flex items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors text-[11px]"
               title="Открыть сайт напрямую в новой вкладке"
             >
               <span>Прямая ссылка</span>
@@ -421,7 +485,7 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
         </div>
       </div>
 
-      {/* Frame Protection Help Banner */}
+      {/* Frame Protection & Login Help Banner */}
       {showBypassHelp && !isUsingSandbox && (
         <div 
           id="frame-bypass-help-banner"
@@ -430,12 +494,12 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
           <div className="space-y-1">
             <div className="font-semibold text-amber-300 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>Решение для сайтов с защитой от фрейма (X-Frame-Options / Cloudflare / CAPTCHA):</span>
+              <span>Решение для входа, форм и сайтов с защитой:</span>
             </div>
             <p className="text-slate-300 text-[11px] leading-relaxed">
-              1. По умолчанию включен <strong>«Туннель-прокси»</strong> — он снимает CSP и X-Frame-Options заголовки автоматически.<br />
-              2. Если сайт использует строгую капчу Cloudflare, нажмите кнопку <strong>«Окно»</strong> в панели сверху: сайт откроется в отдельной вкладке, а кликер продолжит работу.<br />
-              3. Также можно протестировать всю цепочку автокликера на <strong>«Интерактивном полигоне»</strong>.
+              1. <strong>Формы логина и пароля</strong>: Туннель-прокси перехватывает POST-запросы формы, следует по HTTP-редиректам авторизации и сохраняет сессионные куки (индикатор «Сессия: N куки»).<br />
+              2. Если форма использует клиентский JavaScript API (Fetch / XMLHttpRequest), скрипт автоматически туннелирует его через наш сервер.<br />
+              3. Для сайтов с внешней строгой капчей Cloudflare нажмите <strong>«Окно»</strong> в панели сверху: авторизуйтесь в отдельной вкладке.
             </p>
           </div>
           <button

@@ -8,7 +8,10 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  app.use(express.raw({ type: ['application/octet-stream', 'multipart/form-data'], limit: '50mb' }));
+  app.use(express.text({ type: ['text/plain', 'application/xml', 'text/xml'], limit: '50mb' }));
 
   // Health check
   app.get('/api/health', (req: Request, res: Response) => {
@@ -40,10 +43,40 @@ async function startServer() {
   var hoverOverlay = null;
   var pendingRequests = 0;
 
-  // Track network requests to determine page load activity
+  // Helper to resolve and proxy URLs for target origin
+  function getProxiedApiUrl(rawUrl) {
+    try {
+      if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+      if (rawUrl.startsWith('data:') || rawUrl.startsWith('blob:') || rawUrl.includes('/api/proxy?url=')) return rawUrl;
+      var baseEl = document.querySelector('base');
+      var baseHref = baseEl ? baseEl.href : window.location.href;
+      var resolved = new URL(rawUrl, baseHref).href;
+      var currentProxyParam = new URL(window.location.href).searchParams.get('url');
+      if (currentProxyParam) {
+        var pageOrigin = new URL(currentProxyParam).origin;
+        if (resolved.startsWith(pageOrigin)) {
+          return '/api/proxy?url=' + encodeURIComponent(resolved);
+        }
+      }
+    } catch(e) {}
+    return rawUrl;
+  }
+
+  // Intercept fetch to route target-origin API calls through proxy and track activity
   var originalFetch = window.fetch;
   if (originalFetch) {
-    window.fetch = function() {
+    window.fetch = function(input, init) {
+      try {
+        if (typeof input === 'string') {
+          input = getProxiedApiUrl(input);
+        } else if (input && input.url) {
+          var newUrl = getProxiedApiUrl(input.url);
+          if (newUrl !== input.url && typeof Request !== 'undefined') {
+            input = new Request(newUrl, input);
+          }
+        }
+      } catch(e) {}
+
       pendingRequests++;
       notifyStatus();
       return originalFetch.apply(this, arguments).finally(function() {
@@ -53,11 +86,15 @@ async function startServer() {
     };
   }
 
+  // Intercept XHR to route target-origin calls through proxy and track activity
   var originalXHR = window.XMLHttpRequest;
   if (originalXHR) {
     var origOpen = originalXHR.prototype.open;
     var origSend = originalXHR.prototype.send;
-    originalXHR.prototype.open = function() {
+    originalXHR.prototype.open = function(method, url, async, user, password) {
+      try {
+        arguments[1] = getProxiedApiUrl(url);
+      } catch(e) {}
       this._tracked = true;
       return origOpen.apply(this, arguments);
     };
@@ -73,6 +110,24 @@ async function startServer() {
       return origSend.apply(this, arguments);
     };
   }
+
+  // Intercept all form submissions (including login forms) and rewrite action to /api/proxy
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form) return;
+    try {
+      var baseEl = document.querySelector('base');
+      var baseHref = baseEl ? baseEl.href : window.location.href;
+      var action = form.getAttribute('action') || '';
+      if (e.submitter && e.submitter.getAttribute('formaction')) {
+        action = e.submitter.getAttribute('formaction');
+      }
+      var targetUrl = new URL(action, baseHref).href;
+      if (targetUrl && !targetUrl.includes('/api/proxy?url=')) {
+        form.action = '/api/proxy?url=' + encodeURIComponent(targetUrl);
+      }
+    } catch(err) {}
+  }, true);
 
   function notifyStatus() {
     try {
@@ -407,11 +462,332 @@ async function startServer() {
     `);
   });
 
+  // --- Advanced Server-Side Session & Cookie Management for Proxied Websites ---
+  class ProxyCookieJar {
+    private stores = new Map<string, Map<string, string>>();
+
+    private getDomain(hostname: string): string {
+      const parts = hostname.toLowerCase().split('.');
+      if (parts.length >= 2) {
+        return parts.slice(-2).join('.');
+      }
+      return hostname.toLowerCase();
+    }
+
+    public saveSetCookies(hostname: string, setCookieHeaders: string[]) {
+      const domain = this.getDomain(hostname);
+      if (!this.stores.has(domain)) {
+        this.stores.set(domain, new Map());
+      }
+      const store = this.stores.get(domain)!;
+
+      for (const sc of setCookieHeaders) {
+        if (!sc) continue;
+        const firstPart = sc.split(';')[0];
+        const eqIdx = firstPart.indexOf('=');
+        if (eqIdx > 0) {
+          const name = firstPart.substring(0, eqIdx).trim();
+          const val = firstPart.substring(eqIdx + 1).trim();
+          const lower = sc.toLowerCase();
+          if (
+            val === '' ||
+            val.toLowerCase() === 'deleted' ||
+            lower.includes('max-age=0') ||
+            lower.includes('expires=thu, 01 jan 1970')
+          ) {
+            store.delete(name);
+          } else {
+            store.set(name, val);
+          }
+        }
+      }
+    }
+
+    public getCookieHeader(hostname: string, incomingCookieHeader?: string): string {
+      const domain = this.getDomain(hostname);
+      const store = this.stores.get(domain);
+      const cookieMap = new Map<string, string>();
+
+      // Stored server cookies
+      if (store) {
+        store.forEach((val, key) => {
+          cookieMap.set(key, val);
+        });
+      }
+
+      // Incoming client cookies
+      if (incomingCookieHeader) {
+        const parts = incomingCookieHeader.split(';');
+        for (const part of parts) {
+          const eqIdx = part.indexOf('=');
+          if (eqIdx > 0) {
+            const key = part.substring(0, eqIdx).trim();
+            const val = part.substring(eqIdx + 1).trim();
+            cookieMap.set(key, val);
+          }
+        }
+      }
+
+      const pairs: string[] = [];
+      cookieMap.forEach((val, key) => {
+        pairs.push(`${key}=${val}`);
+      });
+      return pairs.join('; ');
+    }
+
+    public getCookiesCount(hostname?: string): number {
+      if (hostname) {
+        return this.stores.get(this.getDomain(hostname))?.size || 0;
+      }
+      let total = 0;
+      this.stores.forEach((store) => {
+        total += store.size;
+      });
+      return total;
+    }
+
+    public clear(hostname?: string) {
+      if (hostname) {
+        this.stores.delete(this.getDomain(hostname));
+      } else {
+        this.stores.clear();
+      }
+    }
+  }
+
+  const cookieJar = new ProxyCookieJar();
+
+  function getSetCookies(headers: Headers): string[] {
+    if (typeof (headers as any).getSetCookie === 'function') {
+      return (headers as any).getSetCookie();
+    }
+    const sc = headers.get('set-cookie');
+    return sc ? [sc] : [];
+  }
+
+  function getRequestBody(req: Request): any {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      return undefined;
+    }
+    if (Buffer.isBuffer(req.body)) {
+      return req.body;
+    }
+    if (typeof req.body === 'string') {
+      return req.body;
+    }
+    if (req.body && typeof req.body === 'object') {
+      const cType = (req.headers['content-type'] || '').toLowerCase();
+      if (cType.includes('application/x-www-form-urlencoded')) {
+        const params = new URLSearchParams();
+        for (const [k, v] of Object.entries(req.body)) {
+          if (Array.isArray(v)) {
+            v.forEach((val) => params.append(k, String(val)));
+          } else {
+            params.append(k, String(v));
+          }
+        }
+        return params.toString();
+      }
+      return JSON.stringify(req.body);
+    }
+    return undefined;
+  }
+
+  function applySetCookiesToResponse(res: Response, setCookies: string[]) {
+    for (const sc of setCookies) {
+      if (!sc) continue;
+      // Strip Domain=... so browser allows setting cookie on proxy origin
+      let modified = sc.replace(/Domain=[^;]+;?/gi, '');
+      // Ensure cross-origin iframe allows session cookies
+      modified = modified.replace(/SameSite=(Strict|Lax)/gi, 'SameSite=None');
+      if (!modified.toLowerCase().includes('samesite=')) {
+        modified += '; SameSite=None';
+      }
+      if (!modified.toLowerCase().includes('secure')) {
+        modified += '; Secure';
+      }
+      res.append('Set-Cookie', modified);
+    }
+  }
+
+  function injectScriptsIntoHtml(rawHtml: string, finalUrl: URL): string {
+    const baseTag = `<base href="${finalUrl.origin}${finalUrl.pathname}">`;
+
+    const antiBusterScript = `
+<script>
+(function() {
+  try {
+    Object.defineProperty(window, 'top', { get: function() { return window.self; }, set: function() {}, configurable: true });
+    Object.defineProperty(window, 'parent', { get: function() { return window.self; }, set: function() {}, configurable: true });
+  } catch(e) {}
+
+  // Intercept link clicks
+  document.addEventListener('click', function(e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+      if (!a.href.includes('/api/proxy?url=')) {
+        e.preventDefault();
+        window.location.href = '/api/proxy?url=' + encodeURIComponent(a.href);
+      }
+    }
+  }, true);
+
+  // Intercept form submissions (including login POST forms)
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form) return;
+    try {
+      var baseEl = document.querySelector('base');
+      var baseHref = baseEl ? baseEl.href : window.location.href;
+      var action = form.getAttribute('action') || '';
+      if (e.submitter && e.submitter.getAttribute('formaction')) {
+        action = e.submitter.getAttribute('formaction');
+      }
+      var targetUrl = new URL(action, baseHref).href;
+      if (targetUrl && !targetUrl.includes('/api/proxy?url=')) {
+        form.action = '/api/proxy?url=' + encodeURIComponent(targetUrl);
+      }
+    } catch(err) {}
+  }, true);
+
+  try {
+    var origSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function() {
+      try {
+        var baseEl = document.querySelector('base');
+        var baseHref = baseEl ? baseEl.href : window.location.href;
+        var action = this.getAttribute('action') || '';
+        var targetUrl = new URL(action, baseHref).href;
+        if (targetUrl && !targetUrl.includes('/api/proxy?url=')) {
+          this.action = '/api/proxy?url=' + encodeURIComponent(targetUrl);
+        }
+      } catch(e) {}
+      return origSubmit.apply(this, arguments);
+    };
+  } catch(e) {}
+})();
+</script>`;
+
+    const runtimeScript = `<script src="/api/injected-runtime.js"></script>`;
+
+    let html = rawHtml
+      .replace(/top\.location\s*=\s*self\.location/gi, '/* neutralized */')
+      .replace(/top\.location\.href\s*=\s*location\.href/gi, '/* neutralized */')
+      .replace(/if\s*\(\s*(window\.)?top\s*!==\s*(window\.)?self\s*\)/gi, 'if(false)')
+      .replace(/if\s*\(\s*(window\.)?top\.location\s*!==\s*(window\.)?location\s*\)/gi, 'if(false)')
+      .replace(/<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '')
+      .replace(/<meta[^>]*http-equiv=["']X-Frame-Options["'][^>]*>/gi, '');
+
+    if (html.includes('<head>')) {
+      html = html.replace('<head>', `<head>${baseTag}${antiBusterScript}${runtimeScript}`);
+    } else if (html.includes('<html>')) {
+      html = html.replace('<html>', `<html><head>${baseTag}${antiBusterScript}${runtimeScript}</head>`);
+    } else {
+      html = `${baseTag}${antiBusterScript}${runtimeScript}${html}`;
+    }
+
+    return html;
+  }
+
+  async function fetchWithRedirectsAndCookies(
+    initialUrl: URL,
+    initialMethod: string,
+    initialHeaders: Record<string, string>,
+    initialBody: any,
+    maxHops = 6
+  ): Promise<{ response: globalThis.Response; finalUrl: URL }> {
+    let currentUrl = initialUrl;
+    let currentMethod = initialMethod.toUpperCase();
+    let currentHeaders: Record<string, string> = { ...initialHeaders };
+    let currentBody = initialBody;
+
+    for (let hop = 0; hop < maxHops; hop++) {
+      const cookieStr = cookieJar.getCookieHeader(currentUrl.hostname, currentHeaders['cookie']);
+      if (cookieStr) {
+        currentHeaders['cookie'] = cookieStr;
+      }
+      currentHeaders['host'] = currentUrl.host;
+
+      if (currentMethod === 'GET' || currentMethod === 'HEAD') {
+        delete currentHeaders['content-length'];
+        delete currentHeaders['content-type'];
+        currentBody = undefined;
+      }
+
+      const res = await fetch(currentUrl.href, {
+        method: currentMethod,
+        headers: currentHeaders,
+        body: currentBody,
+        redirect: 'manual'
+      });
+
+      const setCookies = getSetCookies(res.headers);
+      if (setCookies.length > 0) {
+        cookieJar.saveSetCookies(currentUrl.hostname, setCookies);
+      }
+
+      if ([301, 302, 303, 307, 308].includes(res.status)) {
+        const location = res.headers.get('location');
+        if (location) {
+          const nextUrl = new URL(location, currentUrl.href);
+          currentUrl = nextUrl;
+
+          // In standard HTTP redirects (301, 302, 303), clients switch POST to GET
+          if (res.status === 301 || res.status === 302 || res.status === 303) {
+            currentMethod = 'GET';
+            currentBody = undefined;
+            delete currentHeaders['content-type'];
+            delete currentHeaders['content-length'];
+          }
+          currentHeaders['referer'] = currentUrl.href;
+          continue;
+        }
+      }
+
+      return { response: res, finalUrl: currentUrl };
+    }
+
+    const res = await fetch(currentUrl.href, {
+      method: currentMethod,
+      headers: currentHeaders,
+      body: currentBody,
+      redirect: 'follow'
+    });
+    return { response: res, finalUrl: currentUrl };
+  }
+
+  // Cookie management endpoints
+  app.post('/api/cookies/clear', (req: Request, res: Response) => {
+    const host = req.query.host as string | undefined;
+    cookieJar.clear(host);
+    res.json({ ok: true, message: 'Cookies cleared successfully' });
+  });
+
+  app.get('/api/cookies/status', (req: Request, res: Response) => {
+    const host = req.query.host as string | undefined;
+    res.json({
+      ok: true,
+      cookiesCount: cookieJar.getCookiesCount(host)
+    });
+  });
+
+  // Internal app route whitelist that should NOT be proxied
+  const INTERNAL_APP_ROUTES = new Set([
+    '/api/health',
+    '/api/ping',
+    '/api/proxy',
+    '/api/injected-runtime.js',
+    '/api/cookies/clear',
+    '/api/cookies/status'
+  ]);
+
   // Intercept subresource or relative requests made by pages inside the proxy iframe
   app.use(async (req: Request, res: Response, next) => {
-    // If it's a known app route or asset, skip
+    if (INTERNAL_APP_ROUTES.has(req.path)) {
+      return next();
+    }
+
     if (
-      req.path.startsWith('/api/') ||
       req.path.startsWith('/src/') ||
       req.path.startsWith('/@') ||
       req.path.startsWith('/node_modules/') ||
@@ -424,41 +800,68 @@ async function startServer() {
     }
 
     // Check if the request was initiated from within our /api/proxy iframe
-    const referer = req.headers.referer || req.headers.referrer;
+    const referer = (req.headers.referer || req.headers.referrer) as string | undefined;
     if (typeof referer === 'string' && referer.includes('/api/proxy?url=')) {
       try {
         const refUrl = new URL(referer);
         const targetUrlParam = refUrl.searchParams.get('url');
         if (targetUrlParam) {
           const targetOrigin = new URL(targetUrlParam).origin;
-          const targetFullUrl = `${targetOrigin}${req.originalUrl}`;
-          
-          const proxiedRes = await fetch(targetFullUrl, {
-            headers: {
-              'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-              'Accept': (req.headers.accept as string) || '*/*',
-              'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
-            }
-          });
+          const targetFullUrl = new URL(req.originalUrl, targetOrigin);
 
-          const cType = proxiedRes.headers.get('content-type') || '';
-          if (cType) res.setHeader('Content-Type', cType);
+          const headers: Record<string, string> = {
+            'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+            'Accept': (req.headers.accept as string) || '*/*',
+            'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
+            'Origin': targetOrigin,
+            'Referer': targetUrlParam,
+          };
+
+          const cType = req.headers['content-type'];
+          if (cType) headers['content-type'] = cType;
+
+          const body = getRequestBody(req);
+
+          const { response: proxiedRes, finalUrl } = await fetchWithRedirectsAndCookies(
+            targetFullUrl,
+            req.method,
+            headers,
+            body
+          );
+
+          res.status(proxiedRes.status);
+          const resCType = proxiedRes.headers.get('content-type') || '';
+          if (resCType) res.setHeader('Content-Type', resCType);
           res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+          const setCookies = getSetCookies(proxiedRes.headers);
+          if (setCookies.length > 0) {
+            applySetCookiesToResponse(res, setCookies);
+          }
+
+          if (resCType.includes('text/html')) {
+            let html = await proxiedRes.text();
+            html = injectScriptsIntoHtml(html, finalUrl);
+            res.send(html);
+            return;
+          }
+
           const buffer = await proxiedRes.arrayBuffer();
           res.send(Buffer.from(buffer));
           return;
         }
       } catch (err) {
-        // Continue to next if parsing fails
+        // Fallback to next
       }
     }
 
     next();
   });
 
-  // Proxy endpoint to load external websites without CSP/X-Frame-Options blocks
-  app.get('/api/proxy', async (req: Request, res: Response) => {
-    const targetUrl = req.query.url as string;
+  // Universal Proxy endpoint (GET, POST, PUT, DELETE, etc.) to load external sites with login/session support
+  app.all('/api/proxy', async (req: Request, res: Response) => {
+    let targetUrl = (req.query.url as string) || (req.body?.targetUrl as string);
     if (!targetUrl) {
       res.status(400).send('Missing url parameter');
       return;
@@ -473,73 +876,47 @@ async function startServer() {
     }
 
     try {
-      const response = await fetch(parsedUrl.href, {
-        redirect: 'follow',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-          'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
-          'Upgrade-Insecure-Requests': '1',
-        }
-      });
+      const headers: Record<string, string> = {
+        'User-Agent': (req.headers['user-agent'] as string) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'Accept': (req.headers.accept as string) || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
+        'Upgrade-Insecure-Requests': '1',
+        'Origin': parsedUrl.origin,
+        'Referer': parsedUrl.href,
+      };
 
-      const finalUrl = new URL(response.url || parsedUrl.href);
+      const cType = req.headers['content-type'];
+      if (cType) headers['content-type'] = cType;
+
+      const body = getRequestBody(req);
+
+      const { response, finalUrl } = await fetchWithRedirectsAndCookies(
+        parsedUrl,
+        req.method,
+        headers,
+        body
+      );
+
       const contentType = response.headers.get('content-type') || '';
-      
-      // If not HTML (e.g. image, css, script), pipe the binary or text through
+      res.status(response.status);
+
+      const setCookies = getSetCookies(response.headers);
+      if (setCookies.length > 0) {
+        applySetCookiesToResponse(res, setCookies);
+      }
+
+      // If non-HTML (e.g. image, api JSON, css, script)
       if (!contentType.includes('text/html')) {
         res.setHeader('Content-Type', contentType);
         res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
         const buffer = await response.arrayBuffer();
         res.send(Buffer.from(buffer));
         return;
       }
 
       let html = await response.text();
-
-      // Inject base tag so relative links and assets resolve to target host
-      const baseTag = `<base href="${finalUrl.origin}${finalUrl.pathname}">`;
-      
-      // Anti-frame-busting guard and click interceptor to prevent iframe breakouts
-      const antiBusterScript = `
-<script>
-(function() {
-  try {
-    Object.defineProperty(window, 'top', { get: function() { return window.self; }, set: function() {}, configurable: true });
-    Object.defineProperty(window, 'parent', { get: function() { return window.self; }, set: function() {}, configurable: true });
-  } catch(e) {}
-
-  document.addEventListener('click', function(e) {
-    var a = e.target && e.target.closest ? e.target.closest('a') : null;
-    if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
-      if (!a.href.includes('/api/proxy?url=')) {
-        e.preventDefault();
-        window.location.href = '/api/proxy?url=' + encodeURIComponent(a.href);
-      }
-    }
-  }, true);
-})();
-</script>`;
-
-      const runtimeScript = `<script src="/api/injected-runtime.js"></script>`;
-
-      // Neutralize common inline frame-busting scripts in HTML
-      html = html
-        .replace(/top\.location\s*=\s*self\.location/gi, '/* neutralized */')
-        .replace(/top\.location\.href\s*=\s*location\.href/gi, '/* neutralized */')
-        .replace(/if\s*\(\s*(window\.)?top\s*!==\s*(window\.)?self\s*\)/gi, 'if(false)')
-        .replace(/if\s*\(\s*(window\.)?top\.location\s*!==\s*(window\.)?location\s*\)/gi, 'if(false)')
-        .replace(/<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '')
-        .replace(/<meta[^>]*http-equiv=["']X-Frame-Options["'][^>]*>/gi, '');
-
-      // Inject guard, base tag, and runtime script into <head> or at start
-      if (html.includes('<head>')) {
-        html = html.replace('<head>', `<head>${baseTag}${antiBusterScript}${runtimeScript}`);
-      } else if (html.includes('<html>')) {
-        html = html.replace('<html>', `<html><head>${baseTag}${antiBusterScript}${runtimeScript}</head>`);
-      } else {
-        html = `${baseTag}${antiBusterScript}${runtimeScript}${html}`;
-      }
+      html = injectScriptsIntoHtml(html, finalUrl);
 
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.removeHeader('X-Frame-Options');
@@ -548,6 +925,7 @@ async function startServer() {
       res.removeHeader('Cross-Origin-Opener-Policy');
       res.removeHeader('Cross-Origin-Embedder-Policy');
       res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
 
       res.send(html);
     } catch (err: any) {
